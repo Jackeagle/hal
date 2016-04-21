@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Not a contribution.
  *
  * Copyright (C) 2013 The Android Open Source Project
@@ -240,6 +240,7 @@ void *platform_init(struct audio_device *adev)
     adev->audio_route = audio_route_init(MIXER_CARD, MIXER_XML_PATH);
     if (!adev->audio_route) {
         ALOGE("%s: Failed to init audio route controls, aborting.", __func__);
+        mixer_close(adev->mixer);
         return NULL;
     }
 
@@ -1097,6 +1098,13 @@ int platform_get_fluence_type(void *platform __unused, char *value __unused,
 uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info __unused)
 {
     return 0;
+}
+
+int platform_set_audio_device_interface(const char * device_name __unused,
+                                        const char *intf_name __unused,
+                                        const char *codec_type __unused)
+{
+    return -ENOSYS;
 }
 
 int platform_set_snd_device_name(snd_device_t snd_device __unused,

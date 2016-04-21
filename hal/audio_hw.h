@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Not a contribution.
  *
  * Copyright (C) 2013 The Android Open Source Project
@@ -21,8 +21,8 @@
 #define QCOM_AUDIO_HW_H
 
 #include <cutils/list.h>
-#include <hardware/audio.h>
 #include <hardware/audio_amplifier.h>
+#include <hardware/audio.h>
 #include <tinyalsa/asoundlib.h>
 #include <tinycompress/tinycompress.h>
 
@@ -160,6 +160,7 @@ struct stream_app_type_cfg {
 struct stream_out {
     struct audio_stream_out stream;
     pthread_mutex_t lock; /* see note below on mutex acquisition order */
+    pthread_mutex_t pre_lock; /* acquire before lock to avoid DOS by playback thread */
     pthread_cond_t  cond;
     struct pcm_config config;
     struct compr_config compr_config;
@@ -181,7 +182,6 @@ struct stream_out {
     struct stream_app_type_cfg app_type_cfg;
 
     int non_blocking;
-    bool use_small_bufs;
     int playback_started;
     int offload_state;
     pthread_cond_t offload_cond;
@@ -201,6 +201,7 @@ struct stream_out {
 struct stream_in {
     struct audio_stream_in stream;
     pthread_mutex_t lock; /* see note below on mutex acquisition order */
+    pthread_mutex_t pre_lock; /* acquire before lock to avoid DOS by capture thread */
     struct pcm_config config;
     struct pcm *pcm;
     int standby;
@@ -331,6 +332,8 @@ bool is_offload_usecase(audio_usecase_t uc_id);
 int pcm_ioctl(struct pcm *pcm, int request, ...);
 
 int get_snd_card_state(struct audio_device *adev);
+audio_usecase_t get_usecase_id_from_usecase_type(struct audio_device *adev,
+                                                 usecase_type_t type);
 
 #define LITERAL_TO_STRING(x) #x
 #define CHECK(condition) LOG_ALWAYS_FATAL_IF(!(condition), "%s",\

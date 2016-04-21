@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2013 The Android Open Source Project
@@ -56,8 +56,6 @@
 /* Used in calculating fragment size for pcm offload */
 #define PCM_OFFLOAD_BUFFER_DURATION_FOR_AV 1000 /* 1 sec */
 #define PCM_OFFLOAD_BUFFER_DURATION_FOR_AV_STREAMING 80 /* 80 millisecs */
-#define PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS 20 /* 20 millisecs */
-#define PCM_OFFLOAD_BUFFER_DURATION_MAX 1200  /* 1200 millisecs */
 
 /* MAX PCM fragment size cannot be increased  further due
  * to flinger's cblk size of 1mb,and it has to be a multiple of
@@ -111,6 +109,18 @@ char cal_name_info[WCD9XXX_MAX_CAL][MAX_CAL_NAME] = {
         [WCD9XXX_MAD_CAL] = "mad_cal",
 };
 
+#define  AUDIO_PARAMETER_IS_HW_DECODER_SESSION_ALLOWED  "is_hw_dec_session_allowed"
+
+char * dsp_only_decoders_mime[] = {
+    "audio/x-ms-wma" /* wma*/ ,
+    "audio/x-ms-wma-lossless" /* wma lossless */ ,
+    "audio/x-ms-wma-pro" /* wma prop */ ,
+    "audio/amr-wb-plus" /* amr wb plus */ ,
+    "audio/alac"  /*alac */ ,
+    "audio/x-ape" /*ape */,
+};
+
+
 enum {
 	VOICE_FEATURE_SET_DEFAULT,
 	VOICE_FEATURE_SET_VOLUME_BOOST
@@ -148,6 +158,7 @@ struct platform_data {
     bool hd_voice;
     bool ec_ref_enabled;
     bool is_i2s_ext_modem;
+    bool is_acdb_initialized;
     /* Audio calibration related functions */
     void                       *acdb_handle;
     int                        voice_feature_set;
@@ -250,6 +261,8 @@ static char * device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_SPEAKER_AND_HDMI] = "speaker-and-hdmi",
     [SND_DEVICE_OUT_BT_SCO] = "bt-sco-headset",
     [SND_DEVICE_OUT_BT_SCO_WB] = "bt-sco-headset-wb",
+    [SND_DEVICE_OUT_BT_A2DP] = "bt-a2dp",
+    [SND_DEVICE_OUT_SPEAKER_AND_BT_A2DP] = "speaker-and-bt-a2dp",
     [SND_DEVICE_OUT_VOICE_TTY_FULL_HEADPHONES] = "voice-tty-full-headphones",
     [SND_DEVICE_OUT_VOICE_TTY_VCO_HEADPHONES] = "voice-tty-vco-headphones",
     [SND_DEVICE_OUT_VOICE_TTY_HCO_HANDSET] = "voice-tty-hco-handset",
@@ -343,6 +356,8 @@ static int acdb_device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_SPEAKER_AND_HDMI] = 14,
     [SND_DEVICE_OUT_BT_SCO] = 22,
     [SND_DEVICE_OUT_BT_SCO_WB] = 39,
+    [SND_DEVICE_OUT_BT_A2DP] = 20,
+    [SND_DEVICE_OUT_SPEAKER_AND_BT_A2DP] = 14,
     [SND_DEVICE_OUT_VOICE_TTY_FULL_HEADPHONES] = 17,
     [SND_DEVICE_OUT_VOICE_TTY_VCO_HEADPHONES] = 17,
     [SND_DEVICE_OUT_VOICE_TTY_HCO_HANDSET] = 37,
@@ -438,6 +453,8 @@ static struct name_to_index snd_device_name_index[SND_DEVICE_MAX] = {
     {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_AND_HDMI)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BT_SCO)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BT_SCO_WB)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_BT_A2DP)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_AND_BT_A2DP)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_FULL_HEADPHONES)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_VCO_HEADPHONES)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_HCO_HANDSET)},
@@ -794,6 +811,8 @@ static void set_platform_defaults()
     backend_table[SND_DEVICE_IN_BT_SCO_MIC_WB_NREC] = strdup("bt-sco-wb");
     backend_table[SND_DEVICE_OUT_BT_SCO] = strdup("bt-sco");
     backend_table[SND_DEVICE_OUT_BT_SCO_WB] = strdup("bt-sco-wb");
+    backend_table[SND_DEVICE_OUT_BT_A2DP] = strdup("bt-a2dp");
+    backend_table[SND_DEVICE_OUT_SPEAKER_AND_BT_A2DP] = strdup("speaker-and-bt-a2dp");
     backend_table[SND_DEVICE_OUT_HDMI] = strdup("hdmi");
     backend_table[SND_DEVICE_OUT_SPEAKER_AND_HDMI] = strdup("speaker-and-hdmi");
     backend_table[SND_DEVICE_OUT_VOICE_TX] = strdup("afe-proxy");
@@ -915,10 +934,43 @@ static void audio_hwdep_send_cal(struct platform_data *plat_data)
     if (acdb_loader_get_calibration == NULL) {
         ALOGE("%s: ERROR. dlsym Error:%s acdb_loader_get_calibration", __func__,
            dlerror());
+        close(fd);
         return;
     }
     if (send_codec_cal(acdb_loader_get_calibration, fd) < 0)
         ALOGE("%s: Could not send anc cal", __FUNCTION__);
+    close(fd);
+}
+
+int platform_acdb_init(void *platform)
+{
+    struct platform_data *my_data = (struct platform_data *)platform;
+    char *cvd_version = NULL;
+    int key = 0;
+    const char *snd_card_name;
+    int result;
+    char value[PROPERTY_VALUE_MAX];
+    cvd_version = calloc(1, MAX_CVD_VERSION_STRING_SIZE);
+    if (!cvd_version)
+        ALOGE("Failed to allocate cvd version");
+    else
+        get_cvd_version(cvd_version, my_data->adev);
+
+    property_get("audio.ds1.metainfo.key",value,"0");
+    key = atoi(value);
+    snd_card_name = mixer_get_name(my_data->adev->mixer);
+    result = my_data->acdb_init(snd_card_name, cvd_version, key);
+    if (cvd_version)
+        free(cvd_version);
+    if (!result) {
+        my_data->is_acdb_initialized = true;
+        ALOGD("ACDB initialized");
+        audio_hwdep_send_cal(my_data);
+    } else {
+        my_data->is_acdb_initialized = false;
+        ALOGD("ACDB initialization failed");
+    }
+    return result;
 }
 
 void *platform_init(struct audio_device *adev)
@@ -956,6 +1008,12 @@ void *platform_init(struct audio_device *adev)
         }
 
         snd_card_name = mixer_get_name(adev->mixer);
+        if (!snd_card_name) {
+            ALOGE("failed to allocate memory for snd_card_name\n");
+            free(my_data);
+            mixer_close(adev->mixer);
+            return NULL;
+        }
         ALOGV("%s: snd_card_name: %s", __func__, snd_card_name);
 
         my_data->hw_info = hw_info_init(snd_card_name);
@@ -976,6 +1034,8 @@ void *platform_init(struct audio_device *adev)
                 ALOGE("%s: Failed to init audio route controls, aborting.",
                        __func__);
                 free(my_data);
+                free(snd_card_name);
+                mixer_close(adev->mixer);
                 return NULL;
             }
             adev->snd_card = snd_card_num;
@@ -984,6 +1044,7 @@ void *platform_init(struct audio_device *adev)
         }
         retry_num = 0;
         snd_card_num++;
+        mixer_close(adev->mixer);
     }
 
     if (snd_card_num >= MAX_SND_CARD) {
@@ -1040,8 +1101,6 @@ void *platform_init(struct audio_device *adev)
             my_data->fluence_mode = FLUENCE_BROADSIDE;
         }
     }
-    property_get("audio.ds1.metainfo.key",value,"0");
-    key = atoi(value);
 
     my_data->voice_feature_set = VOICE_FEATURE_SET_DEFAULT;
     my_data->acdb_handle = dlopen(LIB_ACDB_LOADER, RTLD_NOW);
@@ -1087,15 +1146,7 @@ void *platform_init(struct audio_device *adev)
             goto acdb_init_fail;
         }
 
-        cvd_version = calloc(1, MAX_CVD_VERSION_STRING_SIZE);
-        if (!cvd_version)
-            ALOGE("failed to allocate cvd_version");
-        else
-            get_cvd_version(cvd_version, adev);
-
-        my_data->acdb_init(snd_card_name, cvd_version, key);
-        if (cvd_version)
-            free(cvd_version);
+        platform_acdb_init(my_data);
     }
 
 acdb_init_fail:
@@ -1123,6 +1174,10 @@ acdb_init_fail:
 
     /* init usb */
     audio_extn_usb_init(adev);
+
+    /*init a2dp*/
+    audio_extn_a2dp_init();
+
     /* update sound cards appropriately */
     audio_extn_usb_set_proxy_sound_card(adev->snd_card);
 
@@ -1164,6 +1219,13 @@ void platform_deinit(void *platform)
     /* deinit usb */
     audio_extn_usb_deinit();
     audio_extn_dap_hal_deinit();
+}
+
+int platform_is_acdb_initialized(void *platform)
+{
+    struct platform_data *my_data = (struct platform_data *)platform;
+    ALOGD("%s: acdb initialized %d\n", __func__, my_data->is_acdb_initialized);
+    return my_data->is_acdb_initialized;
 }
 
 const char *platform_get_snd_device_name(snd_device_t snd_device)
@@ -1377,7 +1439,7 @@ int platform_get_snd_device_bit_width(snd_device_t snd_device)
     return backend_bit_width_table[snd_device];
 }
 
-int platform_send_audio_calibration(void *platform, struct audio_usecase *usecase,
+int platform_send_audio_calibration(void *platform, snd_device_t snd_device,
                                     int app_type, int sample_rate)
 {
     struct platform_data *my_data = (struct platform_data *)platform;
@@ -1686,7 +1748,7 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         goto exit;
     }
 
-    if (popcount(devices) == 2 && !voice_is_in_call(adev)) {
+    if (popcount(devices) == 2) {
         if (devices == (AUDIO_DEVICE_OUT_WIRED_HEADPHONE |
                         AUDIO_DEVICE_OUT_SPEAKER)) {
             if (my_data->external_spk_1)
@@ -1711,6 +1773,9 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         } else if (devices == (AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET |
                                AUDIO_DEVICE_OUT_SPEAKER)) {
             snd_device = SND_DEVICE_OUT_SPEAKER_AND_USB_HEADSET;
+        } else if ((devices & AUDIO_DEVICE_OUT_SPEAKER) &&
+                   (devices & AUDIO_DEVICE_OUT_ALL_A2DP)) {
+            snd_device = SND_DEVICE_OUT_SPEAKER_AND_BT_A2DP;
         } else {
             ALOGE("%s: Invalid combo device(%#x)", __func__, devices);
             goto exit;
@@ -1760,6 +1825,8 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
                 snd_device = SND_DEVICE_OUT_BT_SCO;
         } else if (devices & AUDIO_DEVICE_OUT_SPEAKER) {
             snd_device = SND_DEVICE_OUT_VOICE_SPEAKER;
+        } else if (devices & AUDIO_DEVICE_OUT_ALL_A2DP) {
+            snd_device = SND_DEVICE_OUT_BT_A2DP;
         } else if (devices & AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET ||
                    devices & AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET) {
             snd_device = SND_DEVICE_OUT_USB_HEADSET;
@@ -2023,8 +2090,7 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
                 platform_set_echo_reference(adev->platform, true);
             }
         }
-    } else if (source == AUDIO_SOURCE_FM_RX ||
-               source == AUDIO_SOURCE_FM_RX_A2DP) {
+    } else if (source == AUDIO_SOURCE_FM_TUNER) {
         snd_device = SND_DEVICE_IN_CAPTURE_FM;
     } else if (source == AUDIO_SOURCE_DEFAULT) {
         goto exit;
@@ -2067,7 +2133,7 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         } else if (in_device & AUDIO_DEVICE_IN_ANLG_DOCK_HEADSET ||
                    in_device & AUDIO_DEVICE_IN_DGTL_DOCK_HEADSET) {
             snd_device = SND_DEVICE_IN_USB_HEADSET_MIC;
-        } else if (in_device & AUDIO_DEVICE_IN_FM_RX) {
+        } else if (in_device & AUDIO_DEVICE_IN_FM_TUNER) {
             snd_device = SND_DEVICE_IN_CAPTURE_FM;
         } else {
             ALOGE("%s: Unknown input device(s) %#x", __func__, in_device);
@@ -2476,6 +2542,8 @@ void platform_get_parameters(void *platform,
     char value[256] = {0};
     int ret;
     char *kv_pairs = NULL;
+    char propValue[PROPERTY_VALUE_MAX]={0};
+    bool prop_playback_enabled = false;
 
     ret = str_parms_get_str(query, AUDIO_PARAMETER_KEY_SLOWTALK,
                             value, sizeof(value));
@@ -2503,6 +2571,41 @@ void platform_get_parameters(void *platform,
         str_parms_add_str(reply, AUDIO_PARAMETER_KEY_VOLUME_BOOST, value);
     }
 
+    /* Handle audio calibration keys */
+    get_audiocal(platform, query, reply);
+    native_audio_get_params(query, reply, value, sizeof(value));
+
+    ret = str_parms_get_str(query, AUDIO_PARAMETER_IS_HW_DECODER_SESSION_ALLOWED,
+                                    value, sizeof(value));
+    if (ret >= 0) {
+        int isallowed = 1; /*true*/
+
+        if (property_get("voice.playback.conc.disabled", propValue, NULL)) {
+            prop_playback_enabled = atoi(propValue) ||
+                !strncmp("true", propValue, 4);
+        }
+
+        if (prop_playback_enabled && (voice_is_in_call(my_data->adev) ||
+             (SND_CARD_STATE_OFFLINE == get_snd_card_state(my_data->adev)))) {
+            char *decoder_mime_type = value;
+
+            //check if unsupported mime type or not
+            if(decoder_mime_type) {
+                int i = 0;
+                for (i = 0; i < sizeof(dsp_only_decoders_mime)/sizeof(dsp_only_decoders_mime[0]); i++) {
+                    if (!strncmp(decoder_mime_type, dsp_only_decoders_mime[i],
+                    strlen(dsp_only_decoders_mime[i]))) {
+                       ALOGD("Rejecting request for DSP only session from HAL during voice call/SSR state");
+                       isallowed = 0;
+                       break;
+                    }
+                }
+            }
+        }
+        str_parms_add_int(reply, AUDIO_PARAMETER_IS_HW_DECODER_SESSION_ALLOWED, isallowed);
+    }
+
+done:
     kv_pairs = str_parms_to_str(reply);
     ALOGV_IF(kv_pairs != NULL, "%s: exit: returns - %s", __func__, kv_pairs);
     free(kv_pairs);
@@ -2524,7 +2627,7 @@ int64_t platform_render_latency(audio_usecase_t usecase)
 int platform_update_usecase_from_source(int source, int usecase)
 {
     ALOGV("%s: input source :%d", __func__, source);
-    if(source == AUDIO_SOURCE_FM_RX_A2DP)
+    if(source == AUDIO_SOURCE_FM_TUNER)
         usecase = USECASE_AUDIO_RECORD_FM_VIRTUAL;
     return usecase;
 }
@@ -2604,42 +2707,44 @@ uint32_t platform_get_compress_offload_buffer_size(audio_offload_info_t* info)
 
 uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info)
 {
-    uint32_t fragment_size = 0;
+    uint32_t fragment_size = MIN_PCM_OFFLOAD_FRAGMENT_SIZE;
     uint32_t bits_per_sample = 16;
-    uint32_t pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS;
 
     if (info->format == AUDIO_FORMAT_PCM_24_BIT_OFFLOAD) {
         bits_per_sample = 32;
     }
 
-    if (info->use_small_bufs) {
-        pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS;
-    } else {
-        if (!info->has_video) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_MAX;
-        } else if (info->has_video && info->is_streaming) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_AV_STREAMING;
-        } else if (info->has_video) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_AV;
-        }
+    if (!info->has_video) {
+        fragment_size = MAX_PCM_OFFLOAD_FRAGMENT_SIZE;
+
+    } else if (info->has_video && info->is_streaming) {
+        fragment_size = (PCM_OFFLOAD_BUFFER_DURATION_FOR_AV_STREAMING
+                                     * info->sample_rate
+                                     * (bits_per_sample >> 3)
+                                     * popcount(info->channel_mask))/1000;
+
+    } else if (info->has_video) {
+        fragment_size = (PCM_OFFLOAD_BUFFER_DURATION_FOR_AV
+                                     * info->sample_rate
+                                     * (bits_per_sample >> 3)
+                                     * popcount(info->channel_mask))/1000;
     }
 
-    //duration is set to 20 ms worth of stereo data at 48Khz
-    //with 16 bit per sample, modify this when the channel
-    //configuration is different
-    fragment_size = (pcm_offload_time
-                     * info->sample_rate
-                     * (bits_per_sample >> 3)
-                     * popcount(info->channel_mask))/1000;
+    char value[PROPERTY_VALUE_MAX] = {0};
+    if((property_get("audio.offload.pcm.buffer.size", value, "")) &&
+            atoi(value)) {
+        fragment_size =  atoi(value) * 1024;
+        ALOGV("Using buffer size from sys prop %d", fragment_size);
+    }
 
-    fragment_size = ALIGN (fragment_size, 1024);
+    fragment_size = ALIGN( fragment_size, 1024);
 
     if(fragment_size < MIN_PCM_OFFLOAD_FRAGMENT_SIZE)
         fragment_size = MIN_PCM_OFFLOAD_FRAGMENT_SIZE;
     else if(fragment_size > MAX_PCM_OFFLOAD_FRAGMENT_SIZE)
         fragment_size = MAX_PCM_OFFLOAD_FRAGMENT_SIZE;
 
-    ALOGI("PCM offload Fragment size to %d bytes", fragment_size);
+    ALOGV("%s: fragment_size %d", __func__, fragment_size);
     return fragment_size;
 }
 
@@ -2856,6 +2961,57 @@ void platform_get_device_to_be_id_map(int **device_to_be_id, int *length)
 {
      *device_to_be_id = msm_device_to_be_id;
      *length = msm_be_id_array_len;
+}
+
+ /* This is a lookup table to map android audio input device to audio h/w interface (backend).
+ * The table can be extended for other input devices by adding appropriate entries.
+ * Also the audio interface for a particular input device can be overriden by adding
+ * corresponding entry in audio_platform_info.xml file.
+ */
+struct audio_device_to_audio_interface audio_device_to_interface_table[] = {
+    {AUDIO_DEVICE_IN_BUILTIN_MIC, ENUM_TO_STRING(AUDIO_DEVICE_IN_BUILTIN_MIC), "SLIMBUS_0"},
+    {AUDIO_DEVICE_IN_BACK_MIC, ENUM_TO_STRING(AUDIO_DEVICE_IN_BACK_MIC), "SLIMBUS_0"},
+};
+
+int audio_device_to_interface_table_len  =
+    sizeof(audio_device_to_interface_table) / sizeof(audio_device_to_interface_table[0]);
+
+int platform_set_audio_device_interface(const char *device_name, const char *intf_name,
+                                        const char *codec_type __unused)
+{
+    int ret = 0;
+    int i;
+
+    if (device_name == NULL || intf_name == NULL) {
+        ALOGE("%s: Invalid input", __func__);
+
+        ret = -EINVAL;
+        goto done;
+    }
+
+    ALOGD("%s: Enter, device name:%s, intf name:%s", __func__, device_name, intf_name);
+
+    size_t device_name_len = strlen(device_name);
+    for (i = 0; i < audio_device_to_interface_table_len; i++) {
+        char* name = audio_device_to_interface_table[i].device_name;
+        size_t name_len = strlen(name);
+        if ((name_len == device_name_len) &&
+            (strncmp(device_name, name, name_len) == 0)) {
+            ALOGD("%s: Matched device name:%s, overwrite intf name with %s",
+                  __func__, device_name, intf_name);
+
+            strlcpy(audio_device_to_interface_table[i].interface_name, intf_name,
+                    sizeof(audio_device_to_interface_table[i].interface_name));
+            goto done;
+        }
+    }
+    ALOGE("%s: Could not find matching device name %s",
+            __func__, device_name);
+
+    ret = -EINVAL;
+
+done:
+    return ret;
 }
 
 int platform_set_snd_device_name(snd_device_t device, const char *name)
